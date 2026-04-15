@@ -4,8 +4,33 @@ The WEBAT (Wind Energy with Bat AI-based Tracker) is a Python-based bat tracking
 ![WEBAT Demo](figures/282.gif)
 
 ## Installation
+<!-- TODO: Think about better installation. Not installing `git-lfs` separately. setup.py? -->
+
+To download the full codes, including large-sized model, `git-lfs` needs to be installed first.
+
+For MacOS:
 ```
-git clone git@github.com:NREL/WEBAT.git
+brew install git-lfs
+git lfs install                 # Update global git config
+git lfs install --system        # Update system git config
+```
+
+For Windows:
+```
+git lfs install
+```
+
+For Ubuntu:
+```
+sudo apt install git-lfs
+git lfs install
+```
+
+<!-- TODO: Let's give more options for set up (e.g., pip install, etc.) -->
+
+Then, proceed `git clone` and set up the environment with `conda`.
+```
+git clone git@github.com:NatLabRockies/WEBAT.git
 conda env create --name webat-env -f environment.yml
 conda activate webat-env
 ```
