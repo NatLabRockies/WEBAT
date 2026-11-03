@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Decode AEye 4Sight M lidar .pcap captures into a human-readable point-cloud CSV.
+"""Decode AEye 4Sight M lidar .pcap captures into human-readable point-cloud CSVs.
+
+The capture is split into one CSV per lidar frame, written to a folder named
+after the pcap file:
+
+    capture.pcap  ->  capture/frame_0000086876.csv
+                      capture/frame_0000086877.csv
+                      ...
+                      capture/summary.csv          (one row per frame)
 
 Usage
 -----
-    python process.py capture.pcap                       # -> capture_points.csv
-    python process.py capture.pcap -o points.csv --summary frames.csv
-    python process.py capture.pcap --split-frames frames_dir/   # one CSV per frame
+    python process.py capture.pcap                       # -> ./capture/ next to the pcap
+    python process.py capture.pcap -o out_dir/           # custom output folder
+    python process.py capture.pcap --overwrite           # replace a previous run
+    python process.py capture.pcap --combined all.csv    # also write one combined CSV
     python process.py capture.pcap --max-frames 20 --min-range 1 --max-range 200
 
 Only the Python standard library is required. Classic pcap (us/ns, either byte
@@ -96,7 +105,7 @@ CSV_COLUMNS = [
 ]
 
 SUMMARY_COLUMNS = [
-    "frame_id", "points", "frame_start_utc", "first_capture_utc", "last_capture_utc",
+    "frame_id", "file", "points", "frame_start_utc", "first_capture_utc", "last_capture_utc",
     "min_range_m", "max_range_m", "mean_range_m", "packets",
 ]
 
@@ -332,16 +341,45 @@ class FrameStats:
         self.packets = set()
 
 
+FRAME_FILE_PREFIX = "frame_"
+SUMMARY_FILE = "summary.csv"
+
+
+def frame_filename(fid):
+    return f"{FRAME_FILE_PREFIX}{fid:010d}.csv"
+
+
+def default_output_dir(pcap_path):
+    base = os.path.basename(pcap_path)
+    for ext in (".pcapng", ".pcap"):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    return os.path.join(os.path.dirname(os.path.abspath(pcap_path)), base)
+
+
+def prepare_output_dir(out_dir, overwrite):
+    """Create out_dir; refuse to mix with a previous run unless overwrite is set."""
+    os.makedirs(out_dir, exist_ok=True)
+    old = [f for f in os.listdir(out_dir)
+           if (f.startswith(FRAME_FILE_PREFIX) and f.endswith(".csv")) or f == SUMMARY_FILE]
+    if old and not overwrite:
+        sys.exit(f"Error: {out_dir} already contains {len(old)} frame/summary CSV file(s) "
+                 "from a previous run. Use --overwrite to replace them or -o to choose another folder.")
+    for f in old:
+        os.remove(os.path.join(out_dir, f))
+
+
 def convert(args):
+    out_dir = args.output_dir or default_output_dir(args.input)
+    prepare_output_dir(out_dir, args.overwrite)
+
     out_fh = None
     writer = None
-    if not args.split_frames or args.output:
-        out_path = args.output or os.path.splitext(args.input)[0] + "_points.csv"
-        out_fh = open(out_path, "w", newline="")
+    if args.combined:
+        out_fh = open(args.combined, "w", newline="")
         writer = csv.writer(out_fh)
         writer.writerow(CSV_COLUMNS)
-    if args.split_frames:
-        os.makedirs(args.split_frames, exist_ok=True)
 
     frames = OrderedDict()
     split = {"fh": None, "writer": None, "frame": None, "seen": set()}
@@ -352,7 +390,7 @@ def convert(args):
         if fid != split["frame"]:
             if split["fh"]:
                 split["fh"].close()
-            path = os.path.join(args.split_frames, f"frame_{fid:010d}.csv")
+            path = os.path.join(out_dir, frame_filename(fid))
             is_new = fid not in split["seen"]
             split["fh"] = open(path, "w" if is_new else "a", newline="")
             split["writer"] = csv.writer(split["fh"])
@@ -385,8 +423,7 @@ def convert(args):
                 st.rmin, st.rmax, st.rsum = min(st.rmin, rng), max(st.rmax, rng), st.rsum + rng
             if writer:
                 writer.writerow(row)
-            if args.split_frames:
-                write_split(fid, row)
+            write_split(fid, row)
             counters["points_written"] += 1
         return True
 
@@ -428,41 +465,43 @@ def convert(args):
         if split["fh"]:
             split["fh"].close()
 
-    if args.summary:
-        with open(args.summary, "w", newline="") as fh:
-            w = csv.writer(fh)
-            w.writerow(SUMMARY_COLUMNS)
-            for fid, st in frames.items():
-                has_r = st.points and st.rmax >= 0
-                w.writerow([
-                    fid, st.points, iso_utc(st.frame_start), iso_utc(st.first_cap), iso_utc(st.last_cap),
+    summary_path = os.path.join(out_dir, SUMMARY_FILE)
+    with open(summary_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(SUMMARY_COLUMNS)
+        for fid, st in frames.items():
+            if not st.points:
+                continue
+            has_r = st.rmax >= 0
+            w.writerow([
+                    fid, frame_filename(fid), st.points, iso_utc(st.frame_start), iso_utc(st.first_cap), iso_utc(st.last_cap),
                     _fmt(st.rmin if has_r else None, 3), _fmt(st.rmax if has_r else None, 3),
                     _fmt(st.rsum / st.points if has_r else None, 3), len(st.packets),
-                ])
+            ])
+    files_written = len(split["seen"])
 
     print(f"Packets read:              {counters['packets']:,}", file=sys.stderr)
     print(f"AEye point-cloud packets:  {counters['aeye_point_packets']:,}", file=sys.stderr)
     print(f"Other AEye packets:        {counters['other_aeye_packets']:,}", file=sys.stderr)
-    print(f"Frames:                    {len(frames):,}", file=sys.stderr)
+    print(f"Frames (CSV files):        {files_written:,}", file=sys.stderr)
     print(f"Points written:            {counters['points_written']:,}", file=sys.stderr)
     if counters["points_filtered"]:
         print(f"Points filtered by range:  {counters['points_filtered']:,}", file=sys.stderr)
+    print(f"Output folder:             {out_dir}", file=sys.stderr)
+    print(f"Frame summary CSV:         {summary_path}", file=sys.stderr)
     if writer:
-        print(f"Point CSV:                 {out_path}", file=sys.stderr)
-    if args.split_frames:
-        print(f"Per-frame CSVs:            {args.split_frames}", file=sys.stderr)
-    if args.summary:
-        print(f"Frame summary CSV:         {args.summary}", file=sys.stderr)
+        print(f"Combined CSV:              {args.combined}", file=sys.stderr)
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Convert an AEye 4Sight M .pcap capture into a human-readable point-cloud CSV.")
+        description="Split an AEye 4Sight M .pcap capture into one human-readable point-cloud CSV per frame.")
     p.add_argument("input", help="input .pcap / .pcapng file")
-    p.add_argument("-o", "--output", help="output CSV path (default: <input>_points.csv)")
-    p.add_argument("--summary", help="optional per-frame summary CSV path")
-    p.add_argument("--split-frames", metavar="DIR",
-                   help="also write one CSV per frame into DIR (main CSV is skipped unless -o is given)")
+    p.add_argument("-o", "--output-dir", metavar="DIR",
+                   help="folder for per-frame CSVs (default: folder named after the pcap, next to it)")
+    p.add_argument("--overwrite", action="store_true",
+                   help="delete frame_*.csv / summary.csv left in the output folder by a previous run")
+    p.add_argument("--combined", metavar="CSV", help="additionally write all points to this single CSV")
     p.add_argument("--port", type=int, default=7001,
                    help="UDP port carrying point-cloud data (default 7001; 0 = any port)")
     p.add_argument("--max-frames", type=int, default=0, help="stop after N frames (0 = all)")

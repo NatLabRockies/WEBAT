@@ -6,7 +6,8 @@ analysis in WEBAT.
 
 | File | Description |
 |---|---|
-| `process.py` | Decoder: `.pcap` → point-cloud CSV (standard-library Python only) |
+| `process.py` | Decoder: `.pcap` → one point-cloud CSV per frame (standard-library Python only) |
+| `<pcap name>/` | Output folder created by `process.py` (large; regenerate rather than commit) |
 
 ---
 
@@ -43,25 +44,50 @@ stays small even for multi-GB files.
 
 ```bash
 cd lidar
-python process.py sample.pcap                                   # -> sample_points.csv
-python process.py sample.pcap -o points.csv --summary frames.csv
-python process.py sample.pcap --split-frames frames/            # frames/frame_<id>.csv
+python process.py sample.pcap                        # -> sample/frame_<id>.csv + sample/summary.csv
+python process.py sample.pcap --overwrite            # replace the output of a previous run
+python process.py sample.pcap -o other_folder/       # write to a different folder
+python process.py sample.pcap --combined all.csv     # also write every point to one CSV
 python process.py sample.pcap --max-frames 20 --min-range 1 --max-range 200
 python process.py --help
 ```
 
+### Output layout
+
+The capture is split into **one CSV per frame** (one lidar scan, ~0.1 s).
+They are written to a folder named after the pcap, next to the pcap file:
+
+```
+lidar/
+├── sample.pcap
+└── sample/
+    ├── frame_0000086876.csv     # all points of frame 86876
+    ├── frame_0000086877.csv
+    ├── ...                      # one file per unique frame_id (403 for sample.pcap)
+    └── summary.csv              # one row per frame (see below)
+```
+
+* File names hold the `frame_id`, zero-padded to 10 digits so they sort in
+  time order.
+* Every frame file has the same header and columns ([Section 3](#3-understanding-the-point-csv)).
+* For `capture20230530_100754.pcap`, the output is 1,773 frame files
+  (~576 MB in total).
+* If the folder already holds output from a previous run, the script stops
+  rather than mixing old and new files. Use `--overwrite` to replace that
+  output; other files in the folder are not touched.
+
 | Option | Default | Meaning |
 |---|---|---|
-| `-o, --output` | `<input>_points.csv` | Combined point CSV |
-| `--summary PATH` | off | Per-frame summary CSV |
-| `--split-frames DIR` | off | One CSV per frame (combined CSV is skipped unless `-o` is also given) |
+| `-o, --output-dir DIR` | folder named after the pcap, next to it | Where the per-frame CSVs and `summary.csv` go |
+| `--overwrite` | off | Delete `frame_*.csv` / `summary.csv` from a previous run first |
+| `--combined CSV` | off | Also write all points to a single CSV |
 | `--port N` | 7001 | UDP port with point data (`0` = any) |
 | `--max-frames N` | all | Stop after N frames |
 | `--min-range`, `--max-range` | none | Drop points outside this range (m) |
 
 Python 3.8+ with no third-party packages. Runtime is about 5 s for
-`sample.pcap` and about 30 s for the full 160 MB capture. The CSV is roughly
-3.5× the size of the pcap.
+`sample.pcap` and about 30 s for the full 160 MB capture. The CSV output is
+roughly 3.5× the size of the pcap.
 
 ## 3. Understanding the point CSV
 
@@ -138,9 +164,9 @@ row. In `sample.pcap`, 94.6 % of laser shots have one return, 4.3 % two,
 * To synchronize with cameras or other instruments, use the clock that was
   disciplined (NTP/PTP/GPS) during the deployment.
 
-### Frame summary CSV (`--summary`)
+### Frame summary CSV (`summary.csv`)
 
-One row per frame: `frame_id`, `points`, `frame_start_utc`,
+One row per frame: `frame_id`, `file` (name of that frame's CSV), `points`, `frame_start_utc`,
 `first_capture_utc`, `last_capture_utc`, `min_range_m`, `max_range_m`,
 `mean_range_m`, `packets`.
 
@@ -154,8 +180,9 @@ incomplete because recording started mid-scan (e.g. 334 points instead of
 import pandas as pd
 import matplotlib.pyplot as plt
 
-df = pd.read_csv("sample_points.csv")
-frame = df[(df.frame_id == df.frame_id.iloc[2000]) & (df.return_type == "strongest")]
+summary = pd.read_csv("sample/summary.csv")
+frame = pd.read_csv(f"sample/{summary.file[10]}")     # 11th frame
+frame = frame[frame.return_type == "strongest"]
 
 ax = plt.figure().add_subplot(projection="3d")
 ax.scatter(frame.x_m, frame.y_m, frame.z_m, c=frame.intensity_high_gain, s=2, cmap="viridis")
@@ -165,7 +192,10 @@ plt.show()
 
 * **Colour by:** `intensity_high_gain` (surface reflectivity), `range_m`, or
   `return_type`.
-* **Animate:** `--split-frames` writes one CSV per frame, ready for a loop.
+* **Animate:** loop over `summary.file` (already in time order) and draw
+  one frame per step.
+* **Several frames:** concatenate them, e.g.
+  `pd.concat(pd.read_csv(f"sample/{f}") for f in summary.file[100:110])`.
 * **Interactive viewers:** [CloudCompare](https://www.cloudcompare.org/) or
   ParaView can open the CSVs directly; map `x_m`/`y_m`/`z_m` to XYZ.
 * **Density:** single frames are sparse (~1,200 points). Stacking several
