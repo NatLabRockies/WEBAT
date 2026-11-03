@@ -7,6 +7,7 @@ analysis in WEBAT.
 | File | Description |
 |---|---|
 | `process.py` | Decoder: `.pcap` → one point-cloud CSV per frame (standard-library Python only) |
+| `visualize.py` | Interactive 3-D viewer: per-frame CSVs → HTML page (needs `plotly`) |
 | `<pcap name>/` | Output folder created by `process.py` (large; regenerate rather than commit) |
 
 ---
@@ -174,7 +175,155 @@ Use it to spot partial frames. The first frame of a capture is usually
 incomplete because recording started mid-scan (e.g. 334 points instead of
 ~1,240).
 
-## 4. Visualization tips
+## 4. Visualization
+
+### Interactive viewer (`visualize.py`)
+
+`visualize.py` reads the output folder of `process.py` and writes a single,
+self-contained HTML page. It opens in any web browser and works offline.
+
+```bash
+python visualize.py sample/                         # -> sample/viewer.html, opens in browser
+python visualize.py sample/ --color range --strongest-only
+python visualize.py sample/ --start-time 10 --end-time 20 --skip-partial   # seconds 10-20 of the capture
+python visualize.py sample/ --accumulate 10         # trail: show the last 10 frames together
+python visualize.py capture20230530_100754/ --every 5 --speed 2 -o capture_every5.html
+python visualize.py sample/ --clean --projection orthographic --export-scale 4   # figure-ready
+python visualize.py sample/ --style journal --image fig3.pdf --start-time 12 --no-title  # static figure
+```
+
+In the page you can:
+
+* **Rotate** (drag), **zoom** (scroll), and **pan** (right-drag).
+* **Move through time** with the slider, or press ▶ Play to resume from the
+  current frame. The slider shows the time since the start of the capture.
+  The title shows the frame's UTC timestamp (sensor clock) and its `frame_id`.
+* **Hover over a point** to see x/y/z, range, intensity, and return type.
+
+**Timing:** playback follows the sensor timestamps (`frame_start_utc`), not
+the frame count. Each frame stays on screen for the real time until the next
+frame, so playback runs at real speed. Uneven frame spacing and dropped
+frames are reproduced, and `--every N` still plays in real time.
+`--speed 2` plays twice as fast. Pauses longer than `--max-gap` seconds
+(default 2), such as gaps in the recording, are shortened.
+
+Axes and colour limits are fixed across frames, so moving objects stand out
+against the static scene. The black diamond marks the sensor at (0, 0, 0).
+
+#### Publication figures
+
+The page uses a print-friendly style:
+
+* white background with light-grey panes and grid;
+* the same font everywhere (Arial by default);
+* perceptually uniform colour scales (Viridis, Plasma, Cividis, Magma) that
+  also read correctly in greyscale;
+* the Okabe-Ito palette for return types, which stays distinguishable for
+  readers with colour-vision deficiency;
+* intensity colour-bar ticks labelled with real counts rather than log10 values.
+
+A **Figure tools** panel in the top-right corner helps you prepare a figure.
+Press **H** to hide or show it, so it does not appear in screenshots.
+
+* **Title / Playback controls / Sensor marker:** show or hide each element.
+* **Save PNG:** downloads the current frame at `--export-scale` × the window
+  resolution (default 3×, e.g. a 1600×900 window gives 4800×2700 px). The
+  playback controls are always left out of the saved image.
+* **Current view:** shows the camera as command-line options, e.g.
+  `--camera-eye 1.23,-0.50,0.75 --camera-center 0.10,0.00,-0.05`. Paste them
+  into another run to show a different frame or capture from exactly the same
+  viewpoint.
+
+**Journal style:** `--style journal` switches to the following, which is
+common in journal figures:
+
+* Times New Roman (change it with `--font-family`);
+* black text and axis lines;
+* white panes;
+* tick marks on the inside;
+* a closed axis box (`mirror`).
+
+The default `--style screen` uses a sans-serif font and light-grey panes, and
+suits slides and on-screen use.
+
+**Static export (`--image`):** writes the first selected frame directly to a
+file instead of the HTML page. The format follows the file extension: `.png`,
+`.pdf`, `.svg`, `.jpg`, `.webp` or `.eps`. Choose the frame with
+`--start-time` or `--start-frame`. The size is `--width`×`--height` (default
+1600×900) times `--export-scale`.
+
+This needs `kaleido` (`pip install kaleido==0.2.1`), the version that works
+with the plotly 5.x installed here.
+
+In PDF, SVG and EPS output the title, axis labels and colour bar are vector.
+The 3-D point cloud is always a high-resolution raster, because Plotly draws
+3-D scenes with WebGL. This is true of any browser-based 3-D plot, so keep
+`--export-scale` at 3 or more.
+
+A typical workflow is:
+
+1. Find the frame and viewpoint you want.
+2. Copy the camera options from the panel.
+3. Re-run with those options plus `--clean`, a fixed `--width/--height` and
+   `--projection orthographic`.
+4. Use **Save PNG** (press H to bring the panel back), or export the same view
+   with `--image fig.pdf`. Avoid low-resolution screenshots.
+
+Orthographic projection removes perspective shrinking, so the grid spacing is
+the same everywhere in the image. This suits figures where distances matter.
+
+For multi-panel figures, use the same `--width/--height`, `--font-size`,
+camera options, and colour limits. Colour limits stay comparable when the
+panels come from the same run or frame window.
+
+**True scale:** x, y and z are drawn at the same scale (1 m is the same length
+on every axis) and share one grid spacing, e.g. a line every 5 m. Distances and
+shapes therefore look as they do in reality. The scene looks flat because the
+field of view is wide and deep but only a few metres tall. Use
+`--aspect stretch` to fill the box instead; this distorts distances. Each axis
+extends a little past its last grid line, so tick labels from different axes
+never meet at a box corner.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-o, --output` | `<folder>/viewer.html` | Output HTML file |
+| `--color` | `intensity` | `intensity` (log scale), `range`, `height`, `return_type`, or `time` |
+| `--strongest-only` | off | Show only the strongest return of each laser shot |
+| `--start-time`, `--end-time` | all | Time window, in seconds from the start of the capture |
+| `--start-frame`, `--end-frame` | all | `frame_id` window to include |
+| `--speed X` | 1 | Playback speed relative to real time |
+| `--max-gap S` | 2 | Longest pause during playback (s) |
+| `--every N` | 1 | Keep every Nth frame |
+| `--max-frames N` | 300 | Cap on frames in one page (`0` = no cap) |
+| `--skip-partial` | off | Drop incomplete frames, such as the first frame of a capture |
+| `--accumulate N` | 1 | Overlay the previous N−1 frames (denser scene, motion trails) |
+| `--min-range`, `--max-range` | none | Hide points outside this range (m) |
+| `--point-size`, `--opacity` | 2, 0.8 | Marker appearance |
+| `--aspect` | `equal` | `equal`: same metres-per-length on x, y, z; `stretch`: each axis fills the box (distorts distances) |
+| `--grid-step M` | automatic | Grid spacing in metres, shared by all axes |
+| `--projection` | `perspective` | `orthographic` keeps sizes constant with depth |
+| `--camera-eye`, `--camera-center` | `-1.6,0,0.6`, `0,0,0` | Viewpoint; copy from the Figure tools panel |
+| `--clean` | off | Start without title, playback controls or panel (press H for the panel) |
+| `--title TEXT` | capture name | Main title line |
+| `--no-title`, `--hide-sensor` | off | Start with the title / sensor marker hidden |
+| `--colorscale NAME` | per colour mode | Override, e.g. `Cividis`, `Greys` |
+| `--style` | `screen` | `journal`: Times New Roman, black lines, white panes, inside ticks, closed axis box |
+| `--font-family`, `--font-size` | from `--style`, 14 | Text style for all labels |
+| `--image FILE` | off | Write a static PNG/PDF/SVG/JPG/WebP/EPS of the first selected frame instead of the HTML (needs kaleido) |
+| `--width`, `--height` | fill window | Fixed figure size in px (set both) |
+| `--export-scale X` | 3 | Resolution multiplier for Save PNG and `--image` |
+| `--no-hover` | off | Omit hover details (smaller, faster page) |
+| `--cdn` | off | Load plotly.js from the internet instead of embedding it (~4.5 MB smaller) |
+| `--no-open` | off | Don't launch the browser |
+
+**Page size:** expect about 80 bytes per point. For `sample/`, 300 frames
+make a ~25 MB page and 100 frames with `--no-hover` make ~8 MB. For long
+captures, use a frame window or `--every` so the page stays responsive.
+
+`visualize.py` reads the CSVs with Python's standard library and only needs
+`plotly` (already in `environment.yml`).
+
+### Other options
 
 ```python
 import pandas as pd
@@ -196,7 +345,7 @@ plt.show()
   one frame per step.
 * **Several frames:** concatenate them, e.g.
   `pd.concat(pd.read_csv(f"sample/{f}") for f in summary.file[100:110])`.
-* **Interactive viewers:** [CloudCompare](https://www.cloudcompare.org/) or
+* **Desktop viewers:** [CloudCompare](https://www.cloudcompare.org/) or
   ParaView can open the CSVs directly; map `x_m`/`y_m`/`z_m` to XYZ.
 * **Density:** single frames are sparse (~1,200 points). Stacking several
   consecutive frames gives a denser picture of static scenery, but moving
