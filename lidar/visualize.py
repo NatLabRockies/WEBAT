@@ -32,6 +32,7 @@ with the standard library, so numpy/pandas are not needed.
 """
 
 import argparse
+import collections
 import csv
 import datetime as dt
 import json
@@ -117,10 +118,11 @@ def load_frame_list(folder):
     return frames
 
 
-def select_frames(frames, args):
+def select_frames(frames, args, keep=None):
     t0 = frames[0][3]
     sel = [f for f in frames
-           if (args.start_frame is None or f[0] >= args.start_frame)
+           if (keep is None or f[0] in keep)
+           and (args.start_frame is None or f[0] >= args.start_frame)
            and (args.end_frame is None or f[0] <= args.end_frame)
            and (args.start_time is None or f[3] - t0 >= args.start_time)
            and (args.end_time is None or f[3] - t0 <= args.end_time)]
@@ -139,10 +141,35 @@ def select_frames(frames, args):
     return sel, t0
 
 
-def read_points(path, args):
-    """Read one frame CSV into a dict of column lists (only what the viewer needs)."""
-    cols = {k: [] for k in ("x_m", "y_m", "z_m", "range_m", "intensity_high_gain",
-                            "return_code", "log_intensity", "time_in_frame_ms", "num_returns")}
+POINT_KEYS = ("x_m", "y_m", "z_m", "range_m", "intensity_high_gain",
+              "return_code", "log_intensity", "time_in_frame_ms", "num_returns")
+OUTLIER_KEYS = ("track_id", "track_frames", "age")
+
+
+def load_outliers(path, args):
+    """outliers.csv -> {frame_id: {point_index: (track_id, track_frames)}} plus the set of hidden points."""
+    if not os.path.exists(path):
+        sys.exit(f"{path} not found. Run outliers.py on the folder first (python outliers.py <folder>).")
+    marks, hidden = collections.defaultdict(dict), collections.defaultdict(set)
+    with open(path, newline="") as fh:
+        for r in csv.DictReader(fh):
+            fid, idx, n = int(r["frame_id"]), int(r["point_index"]), int(r["track_frames"])
+            if n >= args.min_track_frames:
+                marks[fid][idx] = (int(r["track_id"]), n)
+            else:
+                hidden[fid].add(idx)
+    return marks, hidden
+
+
+def read_points(path, args, marks=None, hidden=None):
+    """Read one frame CSV into a dict of column lists (only what the viewer needs).
+
+    With marks (outlier mode) returns (background_cols, outlier_cols); otherwise (cols, None).
+    Outliers on tracks shorter than --min-track-frames (hidden) are left out entirely."""
+    cols = {k: [] for k in POINT_KEYS}
+    out = {k: [] for k in POINT_KEYS + OUTLIER_KEYS} if marks is not None else None
+    marks = marks or {}
+    hidden = hidden or set()
     with open(path, newline="") as fh:
         for r in csv.DictReader(fh):
             rt = r["return_type"]
@@ -154,26 +181,38 @@ def read_points(path, args):
             if rng < args.min_range or (args.max_range and rng > args.max_range):
                 continue
             inten = int(r["intensity_high_gain"] or 0)
-            cols["x_m"].append(round(float(r["x_m"]), 3))
-            cols["y_m"].append(round(float(r["y_m"]), 3))
-            cols["z_m"].append(round(float(r["z_m"]), 3))
-            cols["range_m"].append(round(rng, 2))
-            cols["intensity_high_gain"].append(inten)
-            cols["log_intensity"].append(round(math.log10(max(inten, 1)), 3))
-            cols["return_code"].append(RETURN_TYPES.index(rt) if rt in RETURN_TYPES else 0)
-            cols["time_in_frame_ms"].append(round(float(r["time_in_frame_ms"] or 0), 2))
-            cols["num_returns"].append(int(r["num_returns"] or 1))
-    return cols
+            target = cols
+            if out is not None:
+                idx = int(r["point_index"])
+                if idx in hidden:
+                    continue
+                mark = marks.get(idx)
+                if mark is not None:
+                    target = out
+                    out["track_id"].append(mark[0])
+                    out["track_frames"].append(mark[1])
+                    out["age"].append(0)
+            target["x_m"].append(round(float(r["x_m"]), 3))
+            target["y_m"].append(round(float(r["y_m"]), 3))
+            target["z_m"].append(round(float(r["z_m"]), 3))
+            target["range_m"].append(round(rng, 2))
+            target["intensity_high_gain"].append(inten)
+            target["log_intensity"].append(round(math.log10(max(inten, 1)), 3))
+            target["return_code"].append(RETURN_TYPES.index(rt) if rt in RETURN_TYPES else 0)
+            target["time_in_frame_ms"].append(round(float(r["time_in_frame_ms"] or 0), 2))
+            target["num_returns"].append(int(r["num_returns"] or 1))
+    return cols, out
 
 
 # --------------------------------------------------------------------------- #
 # Figure
 # --------------------------------------------------------------------------- #
 def merge(frames_cols):
+    # Keys of the first dict; extra keys elsewhere (e.g. outlier track columns) are dropped.
     out = {k: [] for k in frames_cols[0]}
     for c in frames_cols:
-        for k, v in c.items():
-            out[k].extend(v)
+        for k in out:
+            out[k].extend(c[k])
     return out
 
 
@@ -241,6 +280,50 @@ def sensor_trace(args):
         hoverinfo="text", hovertext=["Sensor origin (0, 0, 0)"], showlegend=False,
         visible=not args.hide_sensor, name="sensor",
     )
+
+
+def _fade(hex_color, t):
+    """Blend a #rrggbb colour toward white by t (0 = unchanged, 1 = white)."""
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(round(c + (255 - c) * t) for c in (r, g, b))
+
+
+def background_trace(cols, args):
+    return go.Scatter3d(
+        x=cols["x_m"], y=cols["y_m"], z=cols["z_m"], mode="markers",
+        marker=dict(size=args.point_size, color=args.background_color, opacity=args.background_opacity,
+                    line=dict(width=0)),
+        hoverinfo="skip", name="Static background", showlegend=True,
+    )
+
+
+def outlier_trace(cols, args, cmin, cmax, title):
+    """Transient points; older trail points (--accumulate) are drawn smaller and lighter."""
+    n_trail = max(1, args.accumulate - 1)
+    sizes = [args.outlier_size * (1 - 0.5 * a / n_trail) for a in cols["age"]]
+    if args.outlier_color in COLOR_MODES:
+        saved = args.color
+        args.color = args.outlier_color
+        trace = make_trace(cols, args, cmin, cmax, title)
+        args.color = saved
+        trace.marker.size = sizes
+        trace.marker.opacity = 1.0
+    else:
+        colors = [_fade(args.outlier_color, 0.6 * a / n_trail) for a in cols["age"]]
+        trace = go.Scatter3d(x=cols["x_m"], y=cols["y_m"], z=cols["z_m"], mode="markers",
+                             marker=dict(size=sizes, color=colors, opacity=1.0, line=dict(width=0)))
+    if args.no_hover:
+        trace.update(hoverinfo="skip", hovertemplate=None, customdata=None)
+    else:
+        trace.update(
+            customdata=list(zip(cols["track_id"], cols["track_frames"], cols["range_m"],
+                                cols["intensity_high_gain"], cols["age"])),
+            hovertemplate=("<b>Track %{customdata[0]}</b> (%{customdata[1]} frames)<br>"
+                           "<b>x</b> %{x:.2f} m   <b>y</b> %{y:.2f} m   <b>z</b> %{z:.2f} m<br>"
+                           "Range %{customdata[2]:.2f} m · Intensity %{customdata[3]:,}<br>"
+                           "%{customdata[4]} frame(s) ago<extra>" + title + "</extra>"))
+    trace.update(name="Transient points", showlegend=True)
+    return trace
 
 
 def padded_range(values, pad=0.02):
@@ -357,6 +440,9 @@ PAGE_SCRIPT = r"""
     '<label><input type="checkbox" id="ft-title"> Title</label>' +
     '<label><input type="checkbox" id="ft-controls"> Playback controls</label>' +
     '<label><input type="checkbox" id="ft-sensor"> Sensor marker</label>' +
+    (CFG.outlierMode ?
+      '<label><input type="checkbox" id="ft-bg"> Background points</label>' +
+      '<label><input type="checkbox" id="ft-legend"> Legend</label>' : '') +
     '<button id="ft-png">Save PNG (' + CFG.exportScale + '\u00d7 resolution)</button>' +
     '<div class="cam">Current view (reuse on the command line):<code id="ft-cam"></code></div>' +
     '<div class="hint">Playback controls are left out of saved PNGs automatically.</div>' +
@@ -384,6 +470,15 @@ PAGE_SCRIPT = r"""
     state.sensor = this.checked;
     Plotly.restyle(gd, {visible: this.checked}, [1]);
   };
+  if (CFG.outlierMode) {
+    $('ft-bg').checked = true;
+    $('ft-legend').checked = true;
+    // Frames re-send trace 0, so hide the background via opacity (kept across frames) rather than 'visible'.
+    $('ft-bg').onchange = function () {
+      Plotly.restyle(gd, {'marker.opacity': this.checked ? CFG.backgroundOpacity : 0}, [0]);
+    };
+    $('ft-legend').onchange = function () { Plotly.relayout(gd, {showlegend: this.checked}); };
+  }
 
   function currentIndex() {
     var i = CFG.names.indexOf(String(gd._fullLayout._currentFrame));
@@ -412,6 +507,23 @@ PAGE_SCRIPT = r"""
       (CFG.projection === 'orthographic' ? ' --projection orthographic' : '');
   }
   function onCamera(e) { if (e && e['scene.camera']) showCamera(e['scene.camera']); }
+
+  // Plotly's "Reset camera to default" (house icon) resets to Plotly's generic camera; make it
+  // return to this page's starting view (--view / --camera-eye / --camera-center) instead.
+  var resetPending = false;
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest && e.target.closest('[data-attr="resetDefault"]');
+    if (btn && gd.contains(btn)) resetPending = true;
+  }, true);
+  function isPlotlyReset(e) {
+    return e && ('scene.camera.eye' in e) && !e['scene.camera.eye'];
+  }
+  gd.on('plotly_relayout', function (e) {
+    if (resetPending || isPlotlyReset(e)) {
+      resetPending = false;
+      Plotly.relayout(gd, {'scene.camera': JSON.parse(JSON.stringify(CFG.camera))});
+    }
+  });
   gd.on('plotly_relayout', onCamera);
   gd.on('plotly_relayouting', onCamera);
   showCamera();
@@ -437,17 +549,51 @@ PAGE_SCRIPT = r"""
 """
 
 
-def build_figure(selected, per_frame, args, folder, t0):
-    everything = merge([c for c in per_frame if c["x_m"]])
+def to_scene(point, ranges, ratio):
+    """Data coordinates (m) -> Plotly camera coordinates: each axis is centred on the middle of
+    its range and scaled so that the full range spans aspectratio units."""
+    return tuple((p - (lo + hi) / 2) * ratio[a] / (hi - lo) for p, (lo, hi), a in zip(point, ranges, "xyz"))
+
+
+def default_camera(args, ranges, ratio, xs):
+    """Camera eye/center (Plotly units): the sensor's own view unless given on the command line.
+
+    --view sensor puts the eye at the sensor origin looking along +x (forward), level with the
+    horizon, so the scene appears as the sensor sees it. The look-at point is straight ahead at
+    the median forward distance of the points; rotating the view orbits around that point."""
+    if args.view == "sensor":
+        ahead = sorted(xs)[len(xs) // 2] if xs else ranges[0][1] / 2
+        ahead = min(max(ahead, 1.0), ranges[0][1])
+        eye_xyz = to_scene((0.0, 0.0, 0.0), ranges, ratio)
+        center_xyz = to_scene((ahead, 0.0, 0.0), ranges, ratio)
+    else:
+        eye_xyz, center_xyz = (-1.6, 0.0, 0.6), (0.0, 0.0, 0.0)
+    if args.camera_eye is not None:
+        eye_xyz = args.camera_eye
+    if args.camera_center is not None:
+        center_xyz = args.camera_center
+    return (dict(zip("xyz", (round(v, 4) for v in eye_xyz))),
+            dict(zip("xyz", (round(v, 4) for v in center_xyz))))
+
+
+def build_figure(selected, per_frame, args, folder, t0, per_frame_out=None):
+    outlier_mode = per_frame_out is not None
+    everything = merge([c for c in per_frame + (per_frame_out or []) if c["x_m"]] or [per_frame[0]])
     if not everything["x_m"]:
         sys.exit("All points were filtered out; relax --min-range / --max-range / --strongest-only.")
 
     # Fixed colour limits (1st-99th percentile) so colours mean the same in every frame.
-    key = COLOR_MODES[args.color][0]
-    vals = sorted(everything[key])
-    cmin, cmax = percentile(vals, 0.01), percentile(vals, 0.99)
-    if cmin == cmax:
-        cmin, cmax = vals[0], vals[-1] + 1e-9
+    mode = args.outlier_color if outlier_mode else args.color
+    cmin = cmax = 0.0
+    if mode in COLOR_MODES:
+        source = everything
+        if outlier_mode:
+            shown = [c for c in per_frame_out if c["x_m"]]
+            source = merge(shown) if shown else everything
+        vals = sorted(source[COLOR_MODES[mode][0]])
+        cmin, cmax = percentile(vals, 0.01), percentile(vals, 0.99)
+        if cmin == cmax:
+            cmin, cmax = vals[0], vals[-1] + 1e-9
 
     ranges = [padded_range(everything[c] + [0.0]) for c in ("x_m", "y_m", "z_m")]
     if args.aspect == "equal":
@@ -463,6 +609,24 @@ def build_figure(selected, per_frame, args, folder, t0):
         lo = max(0, i - args.accumulate + 1)
         return merge(per_frame[lo:i + 1])
 
+    def trail_cols(i):
+        """Outliers of frame i plus the previous --accumulate - 1 frames, with their age in frames."""
+        lo = max(0, i - args.accumulate + 1)
+        parts = []
+        for j in range(lo, i + 1):
+            c = dict(per_frame_out[j])
+            c["age"] = [i - j] * len(c["x_m"])
+            parts.append(c)
+        return merge(parts)
+
+    def frame_traces(i):
+        tag = f"frame {selected[i][0]}"
+        if outlier_mode:
+            return [background_trace(per_frame[i], args), outlier_trace(trail_cols(i), args, cmin, cmax, tag)]
+        return [make_trace(frame_cols(i), args, cmin, cmax, tag)]
+
+    n_tracks = len({t for c in per_frame_out for t in c["track_id"]}) if outlier_mode else 0
+
     times = [f[3] for f in selected]
     name = os.path.basename(os.path.normpath(folder))
 
@@ -471,16 +635,22 @@ def build_figure(selected, per_frame, args, folder, t0):
         n = len(per_frame[i]["x_m"])
         utc = dt.datetime.fromtimestamp(times[i], dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         trail = f" + previous {min(i, args.accumulate - 1)}" if args.accumulate > 1 else ""
-        sub = (f"{utc} UTC  ·  t = {fmt_elapsed(times[i] - t0)}  ·  "
-               f"frame {fid}{trail}  ·  {n:,} points")
+        if outlier_mode:
+            n_out = len(per_frame_out[i]["x_m"])
+            sub = (f"{utc} UTC  ·  t = {fmt_elapsed(times[i] - t0)}  ·  frame {fid}  ·  "
+                   f"{n_out:,} transient point{'s' if n_out != 1 else ''}{trail}")
+        else:
+            sub = (f"{utc} UTC  ·  t = {fmt_elapsed(times[i] - t0)}  ·  "
+                   f"frame {fid}{trail}  ·  {n:,} points")
         return f"<b>{args.title or name}</b><br><span style='font-size:{args.font_size - 1}px'>{sub}</span>"
 
-    first = frame_cols(0)
-    fig = go.Figure(data=[make_trace(first, args, cmin, cmax, f"frame {selected[0][0]}"), sensor_trace(args)])
+    # Trace order is fixed: 0 = points (background in outlier mode), 1 = sensor, 2 = outliers.
+    first = frame_traces(0)
+    fig = go.Figure(data=[first[0], sensor_trace(args)] + first[1:])
+    animated = [0, 2] if outlier_mode else [0]
 
     fig.frames = [
-        go.Frame(data=[make_trace(frame_cols(i), args, cmin, cmax, f"frame {selected[i][0]}")],
-                 traces=[0], name=str(selected[i][0]),
+        go.Frame(data=frame_traces(i), traces=animated, name=str(selected[i][0]),
                  layout=go.Layout(title_text=label(i)))
         for i in range(len(selected))
     ]
@@ -503,8 +673,8 @@ def build_figure(selected, per_frame, args, folder, t0):
             **axis_extra,
         )
 
-    eye = dict(zip("xyz", args.camera_eye))
-    center = dict(zip("xyz", args.camera_center))
+    eye, center = default_camera(args, (xr, yr, zr), aspect.get("aspectratio", dict(x=1, y=1, z=1)),
+                                 everything["x_m"])
     fig.update_layout(
         template="none",
         font=dict(family=args.font_family, size=fs, color=args.theme["text"]),
@@ -524,6 +694,10 @@ def build_figure(selected, per_frame, args, folder, t0):
         hoverlabel=dict(bgcolor="white", bordercolor=args.theme["muted"],
                         font=dict(family=args.font_family, size=fs - 2, color=args.theme["text"])),
         uirevision="keep",  # keep the user's camera when frames change
+        showlegend=outlier_mode,
+        legend=dict(x=0.01, y=0.99, xanchor="left", yanchor="top", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.85)", bordercolor=args.theme["grid"], borderwidth=1,
+                    font=dict(size=fs - 1, color=args.theme["text"])),
         margin=dict(l=10, r=10, t=TITLE_MARGIN if show_title else 10, b=10),
         updatemenus=[dict(
             type="buttons", direction="left", x=0.0, y=0.0, xanchor="left", yanchor="top",
@@ -567,7 +741,13 @@ def build_figure(selected, per_frame, args, folder, t0):
         showSensor=not args.hide_sensor,
         hidePanel=args.clean,
         projection=args.projection,
+        outlierMode=outlier_mode,
+        backgroundOpacity=args.background_opacity,
+        camera=dict(eye=eye, center=center, up=dict(x=0, y=0, z=1)),
     )
+    if outlier_mode:
+        print(f"Transient points shown: {sum(len(c['x_m']) for c in per_frame_out):,} "
+              f"on {n_tracks} track(s)", file=sys.stderr)
     return fig, PAGE_SCRIPT.replace("__CFG__", json.dumps(cfg))
 
 
@@ -600,6 +780,22 @@ def parse_args(argv=None):
     p.add_argument("--skip-partial", action="store_true",
                    help="drop incomplete frames (fewer than 80%% of the typical point count)")
     p.add_argument("--accumulate", type=int, default=1, help="overlay the previous N-1 frames as a trail (default 1)")
+    p.add_argument("--outliers", nargs="?", const="", metavar="CSV",
+                   help="highlight transient points from outliers.py: background drawn faint grey, outliers in "
+                        "colour. On by default when <folder>/outliers.csv exists; give a path to use another file")
+    p.add_argument("--all-points", action="store_true",
+                   help="ignore outliers.csv and colour every point by --color (the plain point-cloud view)")
+    p.add_argument("--min-track-frames", type=int, default=1,
+                   help="with --outliers: hide outliers whose track spans fewer frames (e.g. 3 drops one-off noise)")
+    p.add_argument("--outlier-frames-only", action="store_true",
+                   help="with --outliers: keep only frames that contain shown outliers")
+    p.add_argument("--outlier-color", default="#D55E00",
+                   help="with --outliers: a colour (default #D55E00, vermilion) or a colour mode "
+                        "(intensity, range, height, return_type, time)")
+    p.add_argument("--outlier-size", type=float, default=5.0, help="with --outliers: outlier marker size (default 5)")
+    p.add_argument("--background-color", default="#9e9e9e", help="with --outliers: background colour (default grey)")
+    p.add_argument("--background-opacity", type=float, default=0.3,
+                   help="with --outliers: background opacity 0-1 (default 0.3)")
     p.add_argument("--min-range", type=float, default=0.0, help="hide points closer than this (m)")
     p.add_argument("--max-range", type=float, default=0.0, help="hide points farther than this (m, 0 = no limit)")
     p.add_argument("--point-size", type=float, default=2.0, help="marker size in pixels (default 2)")
@@ -615,10 +811,13 @@ def parse_args(argv=None):
                    help="grid/tick spacing in metres, shared by all axes (default: chosen automatically)")
     p.add_argument("--projection", choices=["perspective", "orthographic"], default="perspective",
                    help="camera projection; 'orthographic' keeps sizes constant with depth (good for figures)")
-    p.add_argument("--camera-eye", type=_triple, default=(-1.6, 0.0, 0.6), metavar="X,Y,Z",
-                   help="camera position (Plotly scene units); copy it from the Figure tools panel")
-    p.add_argument("--camera-center", type=_triple, default=(0.0, 0.0, 0.0), metavar="X,Y,Z",
-                   help="point the camera looks at (Plotly scene units)")
+    p.add_argument("--view", choices=["sensor", "oblique"], default="sensor",
+                   help="starting viewpoint: 'sensor' (default) looks out from the sensor along +x, as the "
+                        "sensor sees the scene; 'oblique' looks at the whole scene from behind and above")
+    p.add_argument("--camera-eye", type=_triple, metavar="X,Y,Z",
+                   help="camera position (Plotly scene units), overrides --view; copy it from the Figure tools panel")
+    p.add_argument("--camera-center", type=_triple, metavar="X,Y,Z",
+                   help="point the camera looks at (Plotly scene units), overrides --view")
     p.add_argument("--title", help="main title line (default: capture name)")
     p.add_argument("--no-title", action="store_true", help="start with the title hidden")
     p.add_argument("--hide-sensor", action="store_true", help="start with the sensor marker hidden")
@@ -656,6 +855,13 @@ def parse_args(argv=None):
         p.error("--font-size must be at least 6")
     if args.grid_step is not None and args.grid_step <= 0:
         p.error("--grid-step must be positive")
+    if args.all_points and args.outliers is not None:
+        p.error("--all-points and --outliers cannot be combined")
+    if args.all_points and (args.outlier_frames_only or args.min_track_frames > 1):
+        p.error("--outlier-frames-only / --min-track-frames need the outlier view (drop --all-points)")
+    if args.outlier_color not in COLOR_MODES and not (
+            len(args.outlier_color) == 7 and args.outlier_color.startswith("#")):
+        p.error("--outlier-color must be #rrggbb or one of: " + ", ".join(sorted(COLOR_MODES)))
     args.theme = {**THEME, **STYLES[args.style]}
     args.font_family = args.font_family or args.theme["font"]
     if args.image:
@@ -683,7 +889,7 @@ def write_image(fig, args, folder):
     if not show_title:
         fig.update_layout(title_text="")
     if args.hide_sensor:
-        fig.data = fig.data[:1]
+        fig.data = [d for d in fig.data if d.name != "sensor"]
     fig.write_image(args.image, format=args.image_format, width=width, height=height, scale=args.export_scale)
     vector = args.image_format in ("pdf", "svg", "eps")
     print(f"Image: {args.image}  ({width}x{height} px x {args.export_scale:g}"
@@ -696,12 +902,29 @@ def main(argv=None):
     if not os.path.isdir(folder):
         sys.exit(f"{folder} is not a folder. Pass the output folder of process.py, e.g. 'sample/'.")
 
-    selected, t0 = select_frames(load_frame_list(folder), args)
+    if args.outliers is None and not args.all_points:
+        if os.path.exists(os.path.join(folder, "outliers.csv")):
+            args.outliers = ""
+            print("Outlier view: background grey, outliers in colour (from outliers.csv; --all-points to disable)",
+                  file=sys.stderr)
+        elif args.outlier_frames_only or args.min_track_frames > 1:
+            sys.exit(f"No outliers.csv in {folder}; run 'python outliers.py {folder}' first.")
+    marks = hidden = keep = None
+    if args.outliers is not None:
+        marks, hidden = load_outliers(args.outliers or os.path.join(folder, "outliers.csv"), args)
+        if args.outlier_frames_only:
+            keep = {fid for fid, m in marks.items() if m}
+            if not keep:
+                sys.exit("No outliers left to show (lower --min-track-frames).")
+    selected, t0 = select_frames(load_frame_list(folder), args, keep)
     print(f"Loading {len(selected)} frame(s) from {folder} ...", file=sys.stderr)
-    per_frame = [read_points(f[1], args) for f in selected]
-    total = sum(len(c["x_m"]) for c in per_frame)
+    loaded = [read_points(f[1], args, None if marks is None else marks.get(f[0], {}),
+                          None if hidden is None else hidden.get(f[0], set())) for f in selected]
+    per_frame = [c for c, _ in loaded]
+    per_frame_out = [o for _, o in loaded] if marks is not None else None
+    total = sum(len(c["x_m"]) for c in per_frame) + sum(len(c["x_m"]) for c in per_frame_out or [])
 
-    fig, play_script = build_figure(selected, per_frame, args, folder, t0)
+    fig, play_script = build_figure(selected, per_frame, args, folder, t0, per_frame_out)
     if args.image:
         write_image(fig, args, folder)
         return
