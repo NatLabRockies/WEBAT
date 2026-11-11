@@ -214,10 +214,15 @@ class ManualCornerValidator:
                 self.compare_detections(left_path, right_path, corners_left, corners_right)
                 
                 # Ask user to validate
-                print(f"\n  Press 'y' to ACCEPT, 'n' to REJECT (or any other key to see details)")
+                print(f"\n  Press 'y' to ACCEPT, 'n' to REJECT, 'q' to QUIT (or any other key to see details)")
                 key = cv2.waitKey(0)
                 
-                if key == ord('y'):
+                if key == ord('q'):
+                    print(f"  Quitting...")
+                    cv2.destroyAllWindows()
+                    self.save_validation_report(validated_pairs, output_dir)
+                    return validated_pairs
+                elif key == ord('y'):
                     print(f"  ✅ Accepted")
                     validated_pairs.append({
                         'pair_num': pair_idx,
