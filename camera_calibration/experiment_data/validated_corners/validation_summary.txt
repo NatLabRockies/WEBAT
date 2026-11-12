@@ -1,0 +1,37 @@
+CORNER VALIDATION SUMMARY
+============================================================
+
+Checkerboard Size: (7, 7)
+Total Pairs Validated: 30
+
+Valid Pairs:
+  - Pair 187: left_35529.png
+  - Pair 188: left_35557.png
+  - Pair 189: left_35609.png
+  - Pair 190: left_35734.png
+  - Pair 191: left_35788.png
+  - Pair 193: left_35819.png
+  - Pair 194: left_35842.png
+  - Pair 195: left_35902.png
+  - Pair 196: left_36009.png
+  - Pair 197: left_36035.png
+  - Pair 198: left_36101.png
+  - Pair 199: left_36148.png
+  - Pair 200: left_36379.png
+  - Pair 203: left_36979.png
+  - Pair 218: left_38160.png
+  - Pair 219: left_38182.png
+  - Pair 220: left_38227.png
+  - Pair 221: left_38248.png
+  - Pair 222: left_38271.png
+  - Pair 223: left_38294.png
+  - Pair 224: left_38507.png
+  - Pair 225: left_38532.png
+  - Pair 226: left_38650.png
+  - Pair 227: left_38673.png
+  - Pair 228: left_38693.png
+  - Pair 229: left_38741.png
+  - Pair 230: left_38763.png
+  - Pair 231: left_38803.png
+  - Pair 232: left_38823.png
+  - Pair 279: left_51843.png
