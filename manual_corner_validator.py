@@ -46,6 +46,83 @@ class ManualCornerValidator:
         else:
             return None, img, False
     
+    def reorder_corners(self, corners, width, height, operation):
+        """
+        Reorder corners using various transformation operations.
+        
+        Args:
+            corners: Nx1x2 or Nx2 corner array
+            width: Checkerboard width (number of corners)
+            height: Checkerboard height (number of corners)
+            operation: Reordering operation (1-9)
+            
+        Returns:
+            Reordered corners or None if invalid
+        """
+        # Convert to flat Nx2 format first
+        if len(corners.shape) == 3:
+            flat_corners = corners.reshape(-1, 2)
+        else:
+            flat_corners = corners.copy()
+        
+        # Reshape to grid for easier manipulation
+        grid = flat_corners.reshape((height, width, 2))
+        
+        if operation == 1:
+            # Reverse left-right only
+            grid = grid[:, ::-1]
+        elif operation == 2:
+            # Reverse top-bottom only
+            grid = grid[::-1]
+        elif operation == 3:
+            # Flip both directions
+            grid = grid[::-1, ::-1]
+        elif operation == 4:
+            # Transpose (swap rows and columns)
+            if width == height:
+                grid = np.transpose(grid, (1, 0, 2))
+            else:
+                print(f"  ⚠️  Transpose only works with square checkerboards ({width}x{height})")
+                return None
+        elif operation == 5:
+            # Rotate 90 degrees counter-clockwise
+            # Flip horizontally then transpose
+            grid = np.transpose(grid[::-1], (1, 0, 2))
+        elif operation == 6:
+            # Rotate 180 degrees
+            grid = grid[::-1, ::-1]
+        elif operation == 7:
+            # Rotate 270 degrees counter-clockwise (or 90 clockwise)
+            # Flip vertically then transpose
+            grid = np.transpose(grid, (1, 0, 2))[::-1]
+        elif operation == 8:
+            # Complete reverse (reverse all in sequence)
+            flat = grid.reshape(-1, 2)[::-1]
+            grid = flat.reshape((height, width, 2))
+        elif operation == 9:
+            # Mirror around vertical center
+            grid = grid[:, ::-1]
+        else:
+            return None
+        
+        # Convert back to Nx1x2 format
+        return grid.reshape(-1, 1, 2)
+    
+    def _show_reorder_menu(self):
+        """Display reordering options."""
+        print("\n  TRANSFORM CORNERS OPTIONS:")
+        print("    1. Reverse Left-Right (flip horizontally)")
+        print("    2. Reverse Top-Bottom (flip vertically)")
+        print("    3. Flip Both Directions (180° rotation)")
+        print("    4. Transpose (swap rows/columns - square only)")
+        print("    5. Rotate 90° Counter-Clockwise")
+        print("    6. Rotate 180°")
+        print("    7. Rotate 270° Counter-Clockwise")
+        print("    8. Complete Reverse (reverse all corners in sequence)")
+        print("    9. Mirror Vertically")
+        print("    0. Cancel")
+        print("  Choose operation (0-9): ", end="", flush=True)
+    
     def _get_corner_color(self, index, total_corners):
         """
         Get color for corner based on position (gradient from blue to red)
@@ -131,8 +208,8 @@ class ManualCornerValidator:
         Args:
             image_path_left: Path to left image
             image_path_right: Path to right image
-            corners_left: Detected corners in left image
-            corners_right: Detected corners in right image
+            corners_left: Detected corners in left image (Nx1x2 or Nx2)
+            corners_right: Detected corners in right image (Nx1x2 or Nx2)
         """
         img_left = cv2.imread(image_path_left)
         img_right = cv2.imread(image_path_right)
@@ -145,29 +222,90 @@ class ManualCornerValidator:
         display_left = img_left.copy()
         display_right = img_right.copy()
         
-        total_left = len(corners_left) if corners_left is not None else 0
-        total_right = len(corners_right) if corners_right is not None else 0
+        # Normalize corner format to Nx2
+        def normalize_corners(corners):
+            if corners is None:
+                return None
+            if len(corners.shape) == 3 and corners.shape[1] == 1:
+                # Nx1x2 format
+                return corners.reshape(-1, 2).astype(np.float32)
+            elif len(corners.shape) == 2:
+                # Already Nx2 format
+                return corners.astype(np.float32)
+            return corners
+        
+        corners_left_flat = normalize_corners(corners_left)
+        corners_right_flat = normalize_corners(corners_right)
+        
+        total_left = len(corners_left_flat) if corners_left_flat is not None else 0
+        total_right = len(corners_right_flat) if corners_right_flat is not None else 0
         
         # Draw left corners with gradient coloring
-        if corners_left is not None:
-            for i, corner in enumerate(corners_left):
-                x, y = int(corner[0][0]), int(corner[0][1])
+        if corners_left_flat is not None:
+            for i, corner in enumerate(corners_left_flat):
+                x, y = int(corner[0]), int(corner[1])
                 color = self._get_corner_color(i, total_left)
                 cv2.circle(display_left, (x, y), 5, color, -1)
+            
+            # Draw grid lines
+            w, h = self.checkerboard_size
+            if total_left == w * h:  # Only draw if correct number of corners
+                corners_grid = corners_left_flat.reshape((h, w, 2))
+                
+                # Horizontal lines
+                for row in range(h):
+                    for col in range(w - 1):
+                        idx1 = row * w + col
+                        pt1 = tuple(map(int, corners_grid[row, col]))
+                        pt2 = tuple(map(int, corners_grid[row, col + 1]))
+                        color = self._get_corner_color(idx1, total_left)
+                        cv2.line(display_left, pt1, pt2, color, 1)
+                
+                # Vertical lines
+                for col in range(w):
+                    for row in range(h - 1):
+                        idx1 = row * w + col
+                        pt1 = tuple(map(int, corners_grid[row, col]))
+                        pt2 = tuple(map(int, corners_grid[row + 1, col]))
+                        color = self._get_corner_color(idx1, total_left)
+                        cv2.line(display_left, pt1, pt2, color, 1)
         
         # Draw right corners with gradient coloring
-        if corners_right is not None:
-            for i, corner in enumerate(corners_right):
-                x, y = int(corner[0][0]), int(corner[0][1])
+        if corners_right_flat is not None:
+            for i, corner in enumerate(corners_right_flat):
+                x, y = int(corner[0]), int(corner[1])
                 color = self._get_corner_color(i, total_right)
                 cv2.circle(display_right, (x, y), 5, color, -1)
+            
+            # Draw grid lines
+            w, h = self.checkerboard_size
+            if total_right == w * h:  # Only draw if correct number of corners
+                corners_grid = corners_right_flat.reshape((h, w, 2))
+                
+                # Horizontal lines
+                for row in range(h):
+                    for col in range(w - 1):
+                        idx1 = row * w + col
+                        pt1 = tuple(map(int, corners_grid[row, col]))
+                        pt2 = tuple(map(int, corners_grid[row, col + 1]))
+                        color = self._get_corner_color(idx1, total_right)
+                        cv2.line(display_right, pt1, pt2, color, 1)
+                
+                # Vertical lines
+                for col in range(w):
+                    for row in range(h - 1):
+                        idx1 = row * w + col
+                        pt1 = tuple(map(int, corners_grid[row, col]))
+                        pt2 = tuple(map(int, corners_grid[row + 1, col]))
+                        color = self._get_corner_color(idx1, total_right)
+                        cv2.line(display_right, pt1, pt2, color, 1)
         
         # Resize to same height for side-by-side display
-        h = max(display_left.shape[0], display_right.shape[0])
-        w_left = int(display_left.shape[1] * h / display_left.shape[0])
-        w_right = int(display_right.shape[1] * h / display_right.shape[0])
-        display_left = cv2.resize(display_left, (w_left, h))
-        display_right = cv2.resize(display_right, (w_right, h))
+        h_max = max(display_left.shape[0], display_right.shape[0])
+        w_left = int(display_left.shape[1] * h_max / display_left.shape[0])
+        w_right = int(display_right.shape[1] * h_max / display_right.shape[0])
+        display_left = cv2.resize(display_left, (w_left, h_max))
+        display_right = cv2.resize(display_right, (w_right, h_max))
         
         combined = np.hstack([display_left, display_right])
         
@@ -214,7 +352,7 @@ class ManualCornerValidator:
                 self.compare_detections(left_path, right_path, corners_left, corners_right)
                 
                 # Ask user to validate
-                print(f"\n  Press 'y' to ACCEPT, 'n' to REJECT, 'q' to QUIT (or any other key to see details)")
+                print(f"\n  Press 'y' to ACCEPT, 'n' to REJECT, 'r' to REORDER, 'q' to QUIT")
                 key = cv2.waitKey(0)
                 
                 if key == ord('q'):
@@ -222,6 +360,103 @@ class ManualCornerValidator:
                     cv2.destroyAllWindows()
                     self.save_validation_report(validated_pairs, output_dir)
                     return validated_pairs
+                elif key == ord('r'):
+                    # Reordering loop - can reorder left and/or right
+                    reorder_history = []
+                    
+                    while True:
+                        print(f"\n  ℹ️  Which image to reorder?")
+                        print(f"    1 = Left image")
+                        print(f"    2 = Right image")
+                        print(f"    0 = Done reordering")
+                        print(f"  Choose: ", end="", flush=True)
+                        
+                        try:
+                            choice = int(input())
+                        except:
+                            choice = 0
+                        
+                        if choice == 0:
+                            break
+                        elif choice not in [1, 2]:
+                            print(f"  Invalid choice")
+                            continue
+                        
+                        # Show reorder menu
+                        self._show_reorder_menu()
+                        try:
+                            operation = int(input())
+                        except:
+                            operation = 0
+                        
+                        if operation >= 1 and operation <= 9:
+                            if choice == 1:
+                                corners_left_reordered = self.reorder_corners(
+                                    corners_left, 
+                                    self.checkerboard_size[0], 
+                                    self.checkerboard_size[1], 
+                                    operation
+                                )
+                                
+                                if corners_left_reordered is not None:
+                                    corners_left = corners_left_reordered
+                                    reorder_history.append(f"left:{operation}")
+                                    print(f"  ✅ Left image transformed (option {operation})")
+                                else:
+                                    print(f"  ❌ Transform operation failed")
+                            
+                            elif choice == 2:
+                                corners_right_reordered = self.reorder_corners(
+                                    corners_right, 
+                                    self.checkerboard_size[0], 
+                                    self.checkerboard_size[1], 
+                                    operation
+                                )
+                                
+                                if corners_right_reordered is not None:
+                                    corners_right = corners_right_reordered
+                                    reorder_history.append(f"right:{operation}")
+                                    print(f"  ✅ Right image transformed (option {operation})")
+                                else:
+                                    print(f"  ❌ Transform operation failed")
+                            
+                            # Show updated comparison
+                            cv2.destroyAllWindows()  # Close old window first
+                            print(f"  📊 Displaying transformed corners...")
+                            self.compare_detections(left_path, right_path, corners_left, corners_right)
+                            print(f"  💡 Left corners: {len(corners_left) if corners_left is not None else 0}, Right corners: {len(corners_right) if corners_right is not None else 0}")
+                            print(f"\n  Continue transforming or done? Press 'y' to ACCEPT, 'n' to REJECT, 'r' to transform more, 'q' to QUIT")
+                            key = cv2.waitKey(0)
+                            
+                            if key == ord('q'):
+                                print(f"  Quitting...")
+                                cv2.destroyAllWindows()
+                                self.save_validation_report(validated_pairs, output_dir)
+                                return validated_pairs
+                            elif key == ord('y'):
+                                print(f"  ✅ Accepted (with transforms: {', '.join(reorder_history)})")
+                                validated_pairs.append({
+                                    'pair_num': pair_idx,
+                                    'left_file': left_file,
+                                    'right_file': right_file,
+                                    'left_corners': corners_left.tolist(),
+                                    'right_corners': corners_right.tolist(),
+                                    'validation': f'auto-detected with corner transforms: {", ".join(reorder_history)}'
+                                })
+                                cv2.destroyAllWindows()
+                                break
+                            elif key == ord('n'):
+                                print(f"  ❌ Rejected")
+                                cv2.destroyAllWindows()
+                                break
+                            elif key == ord('r'):
+                                continue
+                            else:
+                                cv2.destroyAllWindows()
+                        else:
+                            print(f"  Cancelled reorder")
+                    
+                    cv2.destroyAllWindows()
                 elif key == ord('y'):
                     print(f"  ✅ Accepted")
                     validated_pairs.append({
